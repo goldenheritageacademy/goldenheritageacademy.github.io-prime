@@ -26,6 +26,16 @@ const MENU_ITEMS = [
     limitedAccess: [],                            // can read/enter only
     order: 1
   },
+      {
+  id: "daily-sheet",
+  label: "Daily Sheet",
+  icon: "📋",
+  file: "pages/daily-sheet.html",
+  group: "Accounts",
+  fullAccess: ["admin", "editor"],
+  limitedAccess: ["viewer", "accountent"],
+  order: 9
+   },
    {
   id: "Result",
   label: "Result",
