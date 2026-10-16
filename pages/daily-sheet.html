@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Daily Sheet — Greenfield High Portal</title>
+<link rel="stylesheet" href="../assets/css/common.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="../assets/js/config.js"></script>
+<script src="../assets/js/menu.js"></script>
+<script src="../assets/js/common.js"></script>
+<style>
+  /* ── Layout ─────────────────────────────────────────── */
+  .ds-date-bar {
+    display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .ds-date-bar .field { margin: 0; }
+
+  /* ── Section headings ────────────────────────────────── */
+  .ds-section {
+    margin-bottom: 24px;
+  }
+  .ds-section-title {
+    font-size: .72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .07em; opacity: .55; margin: 0 0 10px;
+  }
+
+  /* ── Summary card grid ───────────────────────────────── */
+  .ds-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+  }
+  .ds-card {
+    padding: 14px 16px; border-radius: var(--radius-md);
+    border: 1px solid rgba(0,0,0,.1);
+  }
+  .ds-card .dc-label {
+    font-size: .73rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .05em; opacity: .6; margin-bottom: 4px;
+  }
+  .ds-card .dc-value {
+    font-size: 1.35rem; font-weight: 700;
+  }
+  .ds-card.dc-in   .dc-value { color: #1a7d3c; }
+  .ds-card.dc-out  .dc-value { color: #b3261e; }
+  .ds-card.dc-due  .dc-value { color: #9c6300; }
+  .ds-card.dc-bal  .dc-value { color: var(--ink); }
+
+  /* ── Transaction tables ──────────────────────────────── */
+  table.data { font-size: .84rem; }
+  .ds-table-wrap { overflow-x: auto; }
+  .ds-empty {
+    text-align: center; padding: 18px; color: rgba(0,0,0,.4);
+    font-size: .85rem; font-style: italic;
+  }
+
+  /* ── Mode badges ─────────────────────────────────────── */
+  .mode-cash     { background:#e8f5e9; color:#1b5e20;  padding:2px 8px; border-radius:99px; font-size:.78rem; font-weight:600; }
+  .mode-bank     { background:#e3f2fd; color:#0d47a1;  padding:2px 8px; border-radius:99px; font-size:.78rem; font-weight:600; }
+  .mode-phonepe  { background:#f3e5f5; color:#6a1b9a;  padding:2px 8px; border-radius:99px; font-size:.78rem; font-weight:600; }
+
+  /* ── Loading spinner ─────────────────────────────────── */
+  #loadingOverlay {
+    display: none; text-align: center; padding: 40px;
+    font-size: 1rem; opacity: .6;
+  }
+  #loadingOverlay.show { display: block; }
+
+  /* ── Print styles ────────────────────────────────────── */
+  @media print {
+    .ds-date-bar, .btn { display: none !important; }
+    .ds-card { border: 1px solid #ccc !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page-wrap enter-up">
+
+  <!-- ── Page header ───────────────────────────────────── -->
+  <div class="page-header">
+    <div>
+      <span class="eyebrow">Accounts</span>
+      <h1>Daily Sheet</h1>
+      <p>Full financial snapshot for a selected date.</p>
+    </div>
+    <button class="btn btn-ghost" onclick="window.print()">🖨 Print</button>
+  </div>
+
+  <!-- ── Date picker ───────────────────────────────────── -->
+  <div class="ds-date-bar">
+    <div class="field">
+      <label for="dsDate">Select Date</label>
+      <input class="input" type="date" id="dsDate" />
+    </div>
+    <button class="btn btn-primary" id="loadBtn">View Sheet</button>
+    <button class="btn btn-ghost" id="recalcBtn" title="Force recalculate and update the snapshot cache">🔄 Recalculate</button>
+  </div>
+
+  <div id="loadingOverlay">⏳ Loading daily sheet…</div>
+
+  <!-- ── Main content (hidden until date loaded) ──────── -->
+  <div id="dsContent" style="display:none;">
+
+    <!-- ═══════════════════════════════════════════════════
+         SECTION 1 — OPENING BALANCES
+    ════════════════════════════════════════════════════ -->
+    <div class="ds-section card">
+      <div class="ds-section-title">Opening Balances (Start of Day)</div>
+      <div class="ds-cards" id="openingCards">
+        <!-- rendered by JS -->
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════
+         SECTION 2 — FEE COLLECTION (Income for the day)
+    ════════════════════════════════════════════════════ -->
+    <div class="ds-section card">
+      <div class="ds-section-title">Fee Collection — Received Today</div>
+      <div class="ds-table-wrap">
+        <table class="data" id="feeTable">
+          <thead>
+            <tr>
+              <th>Student</th><th>Reg No</th><th>Type</th>
+              <th>Cash</th><th>Bank</th><th>PhonePe</th>
+              <th>Discount</th><th>Remark</th>
+            </tr>
+          </thead>
+          <tbody id="feeBody"></tbody>
+          <tfoot id="feeFoot"></tfoot>
+        </table>
+      </div>
+      <div id="feeEmpty" class="ds-empty" style="display:none;">No fee receipts on this date.</div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════
+         SECTION 3 — PAYMENTS / EXPENSES (Vouchers)
+    ════════════════════════════════════════════════════ -->
+    <div class="ds-section card">
+      <div class="ds-section-title">Payments — Vouchers Entered Today</div>
+      <div class="ds-table-wrap">
+        <table class="data" id="voucherTable">
+          <thead>
+            <tr>
+              <th>Voucher</th><th>Type</th><th>Paid To</th>
+              <th>Amount</th><th>Mode</th><th>Category</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody id="voucherBody"></tbody>
+          <tfoot id="voucherFoot"></tfoot>
+        </table>
+      </div>
+      <div id="voucherEmpty" class="ds-empty" style="display:none;">No payment vouchers on this date.</div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════
+         SECTION 4 — CASH INFLOW / OUTFLOW (non-fee / non-voucher)
+    ════════════════════════════════════════════════════ -->
+    <div class="ds-section card">
+      <div class="ds-section-title">Cash Flow — Inflow &amp; Outflow Today</div>
+      <div class="ds-table-wrap">
+        <table class="data" id="cfTable">
+          <thead>
+            <tr>
+              <th>Direction</th><th>Category</th><th>Amount</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody id="cfBody"></tbody>
+          <tfoot id="cfFoot"></tfoot>
+        </table>
+      </div>
+      <div id="cfEmpty" class="ds-empty" style="display:none;">No cash inflow / outflow on this date.</div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════
+         SECTION 5 — INTER-ACCOUNT TRANSFERS
+    ════════════════════════════════════════════════════ -->
+    <div class="ds-section card">
+      <div class="ds-section-title">Inter-Account Transfers Today</div>
+      <div class="ds-table-wrap">
+        <table class="data" id="xferTable">
+          <thead>
+            <tr>
+              <th>From</th><th>To</th><th>Amount</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody id="xferBody"></tbody>
+        </table>
+      </div>
+      <div id="xferEmpty" class="ds-empty" style="display:none;">No inter-account transfers on this date.</div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════
+         SECTION 6 — CLOSING BALANCES
+    ════════════════════════════════════════════════════ -->
+    <div class="ds-section card">
+      <div class="ds-section-title">Closing Balances (End of Day)</div>
+      <div class="ds-cards" id="closingCards">
+        <!-- rendered by JS -->
+      </div>
+    </div>
+
+  </div><!-- /#dsContent -->
+
+</div><!-- /.page-wrap -->
+
+<div id="modalRoot"></div>
+<div id="toastRoot" class="toast-stack"></div>
+
+<script>
+/* ============================================================================
+   DAILY SHEET — daily-sheet.html
+   PAGE_ID must match the id added in menu.js.
+   ============================================================================ */
+const PAGE_ID = "daily-sheet";
+
+/* ── Helpers ───────────────────────────────────────────────────────────────── */
+const $  = id => document.getElementById(id);
+const E  = escapeHtml;
+const inr = n => "₹" + Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+const modeBadge = m => `<span class="mode-${m||"cash"}">${{cash:"💵 Cash",bank:"🏦 Bank",phonepe:"📱 PhonePe"}[m]||m}</span>`;
+const ACCOUNT_LABELS = { cash:"Cash", bank:"Bank", phonepe:"PhonePe" };
+
+/* ── Fee-due calculation engine (mirrors fee-collection.html) ─────────────── */
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function ymKey(y,m){ return `${y}-${String(m).padStart(2,"0")}`; }
+function addMonth(y,m){ m++; if(m>12){m=1;y++;} return {y,m}; }
+function monthsBetweenInclusive(y1,m1,y2,m2){
+  const out=[]; let y=y1,m=m1,g=0;
+  while((y<y2||(y===y2&&m<=m2))&&g<600){out.push({y,m});const n=addMonth(y,m);y=n.y;m=n.m;g++;}
+  return out;
+}
+function getMonthlyRate(y,m,sorted){
+  const end=new Date(y,m,0,23,59,59);
+  let rate=sorted.length?Number(sorted[0].amount):0;
+  for(const r of sorted){if(new Date(r.recorded_at)<=end)rate=Number(r.amount);else break;}
+  return rate;
+}
+function computeMonthlyDue(student, monthlyRates, monthlyReceipts, upToDate){
+  const sorted=[...monthlyRates].sort((a,b)=>new Date(a.recorded_at)-new Date(b.recorded_at));
+  const start=new Date(student.reactivated_at||student.admission_date);
+  const endLimit=upToDate ? new Date(upToDate+"T23:59:59") : new Date();
+  const end=(student.status==="deactivated"&&student.deactivate_date&&new Date(student.deactivate_date)<endLimit)
+    ? new Date(student.deactivate_date) : endLimit;
+
+  const allMonths=monthsBetweenInclusive(start.getFullYear(),start.getMonth()+1,end.getFullYear(),end.getMonth()+1);
+  // Only count receipts up to upToDate
+  const cutoff = upToDate ? new Date(upToDate+"T23:59:59") : new Date();
+  const filteredReceipts = monthlyReceipts.filter(r => new Date(r.recorded_at) <= cutoff);
+  let pool=filteredReceipts.reduce((s,r)=>s+Number(r.amount_cash)+Number(r.amount_bank)+Number(r.amount_phonepe)+Number(r.discount),0);
+
+  let totalDue=0;
+  for(const {y,m} of allMonths){
+    const rate=getMonthlyRate(y,m,sorted);
+    if(pool>=rate){pool-=rate;}
+    else if(pool>0){totalDue+=rate-pool;pool=0;}
+    else{totalDue+=rate;}
+  }
+  return totalDue;
+}
+
+/* ── Main state ────────────────────────────────────────────────────────────── */
+let myAccess = null;
+let cfCategories = {}; // category_id -> name
+
+/* ── Init ──────────────────────────────────────────────────────────────────── */
+async function init(){
+  myAccess = await getMyAccess(PAGE_ID);
+  if(!myAccess.profile) return;
+
+  $("dsDate").value = today();
+  $("loadBtn").onclick   = () => loadSheet(false);
+  $("recalcBtn").onclick = () => loadSheet(true);
+
+  // Pre-load cash flow categories for label lookup
+  const { data: cats } = await supabaseClient.from("cash_flow_categories").select("category_id,name");
+  (cats||[]).forEach(c => cfCategories[c.category_id] = c.name);
+}
+
+/* ── Master load function ──────────────────────────────────────────────────── */
+async function loadSheet(forceRecalc = false){
+  const date = $("dsDate").value;
+  if(!date){ showToast("Please select a date.", "error"); return; }
+
+  $("dsContent").style.display = "none";
+  $("loadingOverlay").classList.add("show");
+
+  try {
+    // ── 1. Opening balances = closing snapshot of previous day ──────────────
+    const { data: prevSnap } = await supabaseClient
+      .from("daily_closing_snapshot")
+      .select("*")
+      .lt("snap_date", date)
+      .order("snap_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const opening = {
+      cash:          Number(prevSnap?.close_cash          || 0),
+      phonepe:       Number(prevSnap?.close_phonepe       || 0),
+      bank:          Number(prevSnap?.close_bank          || 0),
+      admission_due: Number(prevSnap?.close_admission_due || 0),
+      monthly_due:   Number(prevSnap?.close_monthly_due   || 0),
+      old_due:       Number(prevSnap?.close_old_due       || 0),
+    };
+
+    // ── 2. Fee receipts for the day ─────────────────────────────────────────
+    const [
+      { data: feeToday,    error: e1 },
+      { data: vouchers,    error: e2 },
+      { data: cfInToday,   error: e3 },
+      { data: cfOutToday,  error: e4 },
+      { data: xfersToday,  error: e5 },
+    ] = await Promise.all([
+      supabaseClient.from("fee_receipts")
+        .select("*, student_master(name)")
+        .eq("received_date", date)
+        .order("recorded_at", { ascending: true }),
+      supabaseClient.from("general_vouchers")
+        .select("*")
+        .eq("voucher_date", date)
+        .eq("status", "used")
+        .order("voucher_seq", { ascending: true }),
+      supabaseClient.from("cash_inflow")
+        .select("*").eq("txn_date", date),
+      supabaseClient.from("cash_outflow")
+        .select("*").eq("txn_date", date),
+      supabaseClient.from("fund_transfers")
+        .select("*").eq("txn_date", date),
+    ]);
+
+    if(e1||e2||e3||e4||e5){
+      showToast("Failed to load some data. Check console.", "error");
+      console.error(e1,e2,e3,e4,e5);
+      return;
+    }
+
+    // ── 3. Closing balances (cumulative up to and including selected date) ──
+    const closing = await computeClosingBalances(date);
+
+    // ── 4. Render all sections ───────────────────────────────────────────────
+    renderOpeningCards(opening);
+    renderFeeTable(feeToday || []);
+    renderVoucherTable(vouchers || []);
+    renderCFTable(cfInToday || [], cfOutToday || []);
+    renderXferTable(xfersToday || []);
+    renderClosingCards(closing);
+
+    $("dsContent").style.display = "block";
+
+    // ── 5. Upsert snapshot (always update if forceRecalc, or if not cached) ─
+    const shouldUpsert = forceRecalc || !prevSnap || date >= today();
+    if(shouldUpsert && closing){
+      const snapRow = {
+        snap_date:           date,
+        close_cash:          closing.cash,
+        close_phonepe:       closing.phonepe,
+        close_bank:          closing.bank,
+        close_admission_due: closing.admission_due,
+        close_monthly_due:   closing.monthly_due,
+        close_old_due:       closing.old_due,
+        calculated_at:       new Date().toISOString(),
+        calculated_by:       myAccess.profile.user_id,
+      };
+      const { error: snapErr } = await supabaseClient
+        .from("daily_closing_snapshot")
+        .upsert(snapRow, { onConflict: "snap_date" });
+      if(snapErr) console.warn("Snapshot upsert failed:", snapErr.message);
+    }
+
+  } catch(err){
+    showToast("Unexpected error: " + err.message, "error");
+    console.error(err);
+  } finally {
+    $("loadingOverlay").classList.remove("show");
+  }
+}
+
+/* ── Compute closing balances live from DB (cumulative to date) ────────────── */
+async function computeClosingBalances(date){
+  const cutoff = date + "T23:59:59";
+
+  // ── Cash / PhonePe / Bank ──────────────────────────────────────────────────
+  // Sources: fee_receipts (in), general_vouchers (out), cash_inflow (in),
+  //          cash_outflow (out), fund_transfers (+/-)
+  const [
+    { data: allFee },
+    { data: allVouchers },
+    { data: allCfIn },
+    { data: allCfOut },
+    { data: allXfers },
+  ] = await Promise.all([
+    supabaseClient.from("fee_receipts")
+      .select("amount_cash,amount_bank,amount_phonepe,received_date")
+      .lte("received_date", date),
+    supabaseClient.from("general_vouchers")
+      .select("amount,payment_mode,voucher_date")
+      .eq("status","used").lte("voucher_date", date),
+    supabaseClient.from("cash_inflow")
+      .select("amount,txn_date").lte("txn_date", date),
+    supabaseClient.from("cash_outflow")
+      .select("amount,txn_date").lte("txn_date", date),
+    supabaseClient.from("fund_transfers")
+      .select("from_account,to_account,amount,txn_date").lte("txn_date", date),
+  ]);
+
+  const bal = { cash: 0, bank: 0, phonepe: 0 };
+
+  // Fee receipts are INFLOW by mode
+  (allFee||[]).forEach(r => {
+    bal.cash    += Number(r.amount_cash    || 0);
+    bal.bank    += Number(r.amount_bank    || 0);
+    bal.phonepe += Number(r.amount_phonepe || 0);
+  });
+
+  // General vouchers are OUTFLOW — deducted from the mode column
+  (allVouchers||[]).forEach(v => {
+    const m = v.payment_mode || "cash";
+    bal[m] = (bal[m] || 0) - Number(v.amount || 0);
+  });
+
+  // Cash inflow (non-fee) adds to cash
+  (allCfIn||[]).forEach(r  => { bal.cash += Number(r.amount || 0); });
+  // Cash outflow (non-voucher) subtracts from cash
+  (allCfOut||[]).forEach(r => { bal.cash -= Number(r.amount || 0); });
+
+  // Fund transfers
+  (allXfers||[]).forEach(x => {
+    const amt = Number(x.amount || 0);
+    bal[x.from_account] = (bal[x.from_account] || 0) - amt;
+    bal[x.to_account]   = (bal[x.to_account]   || 0) + amt;
+  });
+
+  // ── Admission / Readmission Due ─────────────────────────────────────────────
+  const [
+    { data: fmAll },
+    { data: arReceipts },
+  ] = await Promise.all([
+    supabaseClient.from("fee_master")
+      .select("type,amount"),
+    supabaseClient.from("fee_receipts")
+      .select("amount_cash,amount_bank,amount_phonepe,discount,recorded_at")
+      .eq("fee_type","admission_readmission"),
+  ]);
+
+  const admCharged = (fmAll||[])
+    .filter(r=>r.type==="admission"||r.type==="readmission")
+    .reduce((s,r)=>s+Number(r.amount||0), 0);
+  const admPaid = (arReceipts||[])
+    .filter(r=>new Date(r.recorded_at)<=new Date(cutoff))
+    .reduce((s,r)=>s+Number(r.amount_cash||0)+Number(r.amount_bank||0)+Number(r.amount_phonepe||0)+Number(r.discount||0),0);
+  const admissionDue = Math.max(0, admCharged - admPaid);
+
+  // ── Monthly Due (per-student FIFO up to this date) ──────────────────────────
+  const [
+    { data: students },
+    { data: allFeeM },
+    { data: allMonthlyR },
+  ] = await Promise.all([
+    supabaseClient.from("student_master").select("reg_no,class,admission_date,reactivated_at,deactivate_date,status"),
+    supabaseClient.from("fee_master").select("student_reg_no,type,amount,recorded_at"),
+    supabaseClient.from("fee_receipts")
+      .select("student_reg_no,fee_type,amount_cash,amount_bank,amount_phonepe,discount,recorded_at")
+      .eq("fee_type","monthly"),
+  ]);
+
+  let monthlyDue = 0;
+  for(const student of (students||[])){
+    const rates    = (allFeeM||[]).filter(r=>r.student_reg_no===student.reg_no && r.type==="monthly");
+    const receipts = (allMonthlyR||[]).filter(r=>r.student_reg_no===student.reg_no);
+    monthlyDue += computeMonthlyDue(student, rates, receipts, date);
+  }
+
+  // ── Old Due (cumulative balance as of date) ──────────────────────────────────
+  const [
+    { data: oldDues },
+    { data: duePayments },
+  ] = await Promise.all([
+    supabaseClient.from("student_old_dues").select("due_amount"),
+    supabaseClient.from("due_payments")
+      .select("amount,discount,payment_date")
+      .lte("payment_date", date),
+  ]);
+
+  const oldDueTotal = (oldDues||[]).reduce((s,r)=>s+Number(r.due_amount||0),0);
+  const oldDuePaid  = (duePayments||[]).reduce((s,r)=>s+Number(r.amount||0)+Number(r.discount||0),0);
+  const oldDue      = Math.max(0, oldDueTotal - oldDuePaid);
+
+  return {
+    cash: bal.cash,
+    bank: bal.bank,
+    phonepe: bal.phonepe,
+    admission_due: admissionDue,
+    monthly_due:   monthlyDue,
+    old_due:       oldDue,
+  };
+}
+
+/* ── RENDER: Opening cards ─────────────────────────────────────────────────── */
+function renderOpeningCards(o){
+  $("openingCards").innerHTML = `
+    ${balCard("Opening Cash",     o.cash,          "dc-bal")}
+    ${balCard("Opening PhonePe",  o.phonepe,       "dc-bal")}
+    ${balCard("Opening Bank",     o.bank,          "dc-bal")}
+    <div style="grid-column:1/-1; border-top:1px dashed rgba(0,0,0,.12); margin:4px 0;"></div>
+    ${balCard("Opening Admission Due", o.admission_due, "dc-due")}
+    ${balCard("Opening Monthly Due",   o.monthly_due,   "dc-due")}
+    ${balCard("Opening Old Due",       o.old_due,       "dc-due")}
+  `;
+}
+function balCard(label, val, cls){
+  return `<div class="ds-card ${cls}">
+    <div class="dc-label">${label}</div>
+    <div class="dc-value">${inr(val)}</div>
+  </div>`;
+}
+
+/* ── RENDER: Fee table ─────────────────────────────────────────────────────── */
+function renderFeeTable(rows){
+  const body  = $("feeBody");
+  const foot  = $("feeFoot");
+  const empty = $("feeEmpty");
+  const tbl   = $("feeTable");
+
+  if(!rows.length){ body.innerHTML=""; foot.innerHTML=""; tbl.style.display="none"; empty.style.display="block"; return; }
+  tbl.style.display="table"; empty.style.display="none";
+
+  const typeLbl = { monthly:"Monthly", admission_readmission:"Admission/Readmission", other:"Other" };
+  body.innerHTML = rows.map(r=>`<tr>
+    <td>${E(r.student_master?.name || r.student_reg_no)}</td>
+    <td>${E(r.student_reg_no)}</td>
+    <td>${E(typeLbl[r.fee_type]||r.fee_type)}</td>
+    <td class="num">${inr(r.amount_cash)}</td>
+    <td class="num">${inr(r.amount_bank)}</td>
+    <td class="num">${inr(r.amount_phonepe)}</td>
+    <td class="num">${inr(r.discount)}</td>
+    <td>${E(r.remark||"")}</td>
+  </tr>`).join("");
+
+  const tot = { cash:0, bank:0, pp:0, disc:0 };
+  rows.forEach(r=>{ tot.cash+=Number(r.amount_cash||0); tot.bank+=Number(r.amount_bank||0); tot.pp+=Number(r.amount_phonepe||0); tot.disc+=Number(r.discount||0); });
+  foot.innerHTML = `<tr style="font-weight:700;">
+    <td colspan="3">Totals (${rows.length} receipt${rows.length!==1?"s":""})</td>
+    <td class="num">${inr(tot.cash)}</td>
+    <td class="num">${inr(tot.bank)}</td>
+    <td class="num">${inr(tot.pp)}</td>
+    <td class="num">${inr(tot.disc)}</td>
+    <td></td>
+  </tr>`;
+}
+
+/* ── RENDER: Voucher table ─────────────────────────────────────────────────── */
+function renderVoucherTable(rows){
+  const body  = $("voucherBody");
+  const foot  = $("voucherFoot");
+  const empty = $("voucherEmpty");
+  const tbl   = $("voucherTable");
+
+  if(!rows.length){ body.innerHTML=""; foot.innerHTML=""; tbl.style.display="none"; empty.style.display="block"; return; }
+  tbl.style.display="table"; empty.style.display="none";
+
+  const typeLbl = { cash:"Cash", creditor:"Creditor", salary:"Salary" };
+  body.innerHTML = rows.map(r=>`<tr>
+    <td>${E(r.voucher_no)}</td>
+    <td>${E(typeLbl[r.voucher_type]||r.voucher_type||"")}</td>
+    <td>${E(r.payment_to||"")}</td>
+    <td class="num">${inr(r.amount)}</td>
+    <td>${modeBadge(r.payment_mode)}</td>
+    <td>${E(r.category||"")}</td>
+    <td>${E(r.description||"")}</td>
+  </tr>`).join("");
+
+  const tot = { cash:0, bank:0, phonepe:0 };
+  rows.forEach(r=>{ const m=r.payment_mode||"cash"; tot[m]=(tot[m]||0)+Number(r.amount||0); });
+  const grandTotal = rows.reduce((s,r)=>s+Number(r.amount||0),0);
+  foot.innerHTML = `<tr style="font-weight:700;">
+    <td colspan="3">Totals (${rows.length} voucher${rows.length!==1?"s":""})</td>
+    <td class="num">${inr(grandTotal)}</td>
+    <td colspan="3" style="font-size:.78rem;opacity:.7;">
+      💵 ${inr(tot.cash)} &nbsp; 🏦 ${inr(tot.bank)} &nbsp; 📱 ${inr(tot.phonepe)}
+    </td>
+  </tr>`;
+}
+
+/* ── RENDER: Cash flow table ───────────────────────────────────────────────── */
+function renderCFTable(inRows, outRows){
+  const body  = $("cfBody");
+  const foot  = $("cfFoot");
+  const empty = $("cfEmpty");
+  const tbl   = $("cfTable");
+
+  const combined = [
+    ...inRows.map(r=>({ dir:"Inflow",  cat: cfCategories[r.category_id]||"—", amt:Number(r.amount||0), desc:r.description||"" })),
+    ...outRows.map(r=>({ dir:"Outflow", cat: cfCategories[r.category_id]||"—", amt:Number(r.amount||0), desc:r.description||"" })),
+  ];
+
+  if(!combined.length){ body.innerHTML=""; foot.innerHTML=""; tbl.style.display="none"; empty.style.display="block"; return; }
+  tbl.style.display="table"; empty.style.display="none";
+
+  body.innerHTML = combined.map(r=>`<tr>
+    <td><span class="${r.dir==="Inflow"?"mode-bank":"mode-phonepe"}">${r.dir}</span></td>
+    <td>${E(r.cat)}</td>
+    <td class="num ${r.dir==="Inflow"?"":"" }">${inr(r.amt)}</td>
+    <td>${E(r.desc)}</td>
+  </tr>`).join("");
+
+  const totalIn  = inRows.reduce((s,r)=>s+Number(r.amount||0),0);
+  const totalOut = outRows.reduce((s,r)=>s+Number(r.amount||0),0);
+  foot.innerHTML = `<tr style="font-weight:700;">
+    <td colspan="2">Net Cash Flow</td>
+    <td class="num">${inr(totalIn - totalOut)}</td>
+    <td style="font-size:.78rem;opacity:.7;">In ${inr(totalIn)} / Out ${inr(totalOut)}</td>
+  </tr>`;
+}
+
+/* ── RENDER: Transfer table ────────────────────────────────────────────────── */
+function renderXferTable(rows){
+  const body  = $("xferBody");
+  const empty = $("xferEmpty");
+  const tbl   = $("xferTable");
+
+  if(!rows.length){ body.innerHTML=""; tbl.style.display="none"; empty.style.display="block"; return; }
+  tbl.style.display="table"; empty.style.display="none";
+
+  body.innerHTML = rows.map(r=>`<tr>
+    <td>${E(ACCOUNT_LABELS[r.from_account]||r.from_account)}</td>
+    <td>${E(ACCOUNT_LABELS[r.to_account]  ||r.to_account)}</td>
+    <td class="num">${inr(r.amount)}</td>
+    <td>${E(r.description||"")}</td>
+  </tr>`).join("");
+}
+
+/* ── RENDER: Closing cards ─────────────────────────────────────────────────── */
+function renderClosingCards(c){
+  $("closingCards").innerHTML = `
+    ${balCard("Closing Cash",     c.cash,          c.cash    >= 0 ? "dc-in" : "dc-out")}
+    ${balCard("Closing PhonePe",  c.phonepe,       c.phonepe >= 0 ? "dc-in" : "dc-out")}
+    ${balCard("Closing Bank",     c.bank,          c.bank    >= 0 ? "dc-in" : "dc-out")}
+    <div style="grid-column:1/-1; border-top:1px dashed rgba(0,0,0,.12); margin:4px 0;"></div>
+    ${balCard("Closing Admission Due", c.admission_due, "dc-due")}
+    ${balCard("Closing Monthly Due",   c.monthly_due,   "dc-due")}
+    ${balCard("Closing Old Due",       c.old_due,       "dc-due")}
+  `;
+}
+
+/* ── Boot ──────────────────────────────────────────────────────────────────── */
+init();
+</script>
+</body>
+</html>
