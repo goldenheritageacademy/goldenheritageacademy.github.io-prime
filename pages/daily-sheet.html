@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Daily Sheet — Greenfield High Portal</title>
+<title>Daily Sheet — Golden Heritage Academy</title>
 <link rel="stylesheet" href="../assets/css/common.css" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="../assets/js/config.js"></script>
@@ -37,6 +37,7 @@
     padding:18px 22px; margin-bottom:18px; border-radius:14px;
     background:linear-gradient(120deg,#1f3a5f 0%,#2c5282 100%); color:#fff;
   }
+  .ds-banner .b-school  { font-size:1.7rem; font-weight:800; letter-spacing:.02em; line-height:1.15; margin-bottom:6px; }
   .ds-banner .b-eyebrow { font-size:.7rem; letter-spacing:.14em; text-transform:uppercase; opacity:.75; font-weight:600; }
   .ds-banner .b-date    { font-size:1.45rem; font-weight:700; margin-top:2px; }
   .ds-banner .b-meta    { text-align:right; font-size:.8rem; opacity:.85; line-height:1.5; }
@@ -117,6 +118,7 @@
   .ds-table .muted{ color:var(--ds-muted); }
   .ds-table .for-months { font-size:.78rem; color:var(--ds-ink); margin-top:4px; font-weight:500; }
   .cls-pill { display:inline-block; padding:2px 9px; border-radius:6px; background:var(--ds-soft); border:1px solid var(--ds-line); font-size:.76rem; font-weight:600; white-space:nowrap; }
+  .by-pill { display:inline-block; padding:2px 9px; border-radius:6px; background:var(--ds-soft); border:1px solid var(--ds-line); font-size:.76rem; font-weight:600; white-space:nowrap; }
   .fallback-flag { color:var(--ds-amber); font-weight:700; cursor:help; }
 
   /* Multi-mode stacked cells: amount and mode lines stay aligned row-for-row */
@@ -205,6 +207,7 @@
     <!-- Report banner -->
     <div class="ds-banner">
       <div>
+        <div class="b-school">Golden Heritage Academy</div>
         <div class="b-eyebrow">Daily Accounts Sheet</div>
         <div class="b-date" id="bannerDate">—</div>
       </div>
@@ -230,7 +233,7 @@
             <tr>
               <th>#</th><th>Student</th><th>Class</th><th>Fee For</th>
               <th class="num">Received</th><th>Mode</th>
-              <th class="num">Discount</th><th>Remark</th>
+              <th class="num">Discount</th><th>Remark</th><th>Received By</th>
             </tr>
           </thead>
           <tbody id="feeBody"></tbody>
@@ -252,7 +255,7 @@
           <thead>
             <tr>
               <th>Voucher</th><th>Type</th><th>Paid To</th>
-              <th class="num">Amount</th><th>Mode</th><th>Category</th><th>Description</th>
+              <th class="num">Amount</th><th>Mode</th><th>Category</th><th>Description</th><th>Paid By</th>
             </tr>
           </thead>
           <tbody id="voucherBody"></tbody>
@@ -334,10 +337,8 @@ const CLASS_SHORT = {
 };
 const classLabel = c => c ? (CLASS_SHORT[c] || String(c)) : "—";
 
-/* The date a receipt "belongs" to: its receive date, or (for older rows that
-   have none) the local calendar date it was recorded on. */
-const localDateOf = iso => { const d = new Date(iso); return isNaN(d) ? "" : ymd(d); };
-const effDate = r => r.received_date || localDateOf(r.recorded_at);
+/* A receipt belongs to its "Fee Receive Date" only — never the entry date. */
+const effDate = r => r.received_date;
 
 /* Supabase returns max 1000 rows per request — page through everything. */
 async function fetchAll(buildQuery){
@@ -414,6 +415,34 @@ function computeMonthlyDue(student, sortedRates, monthlyReceipts, date){
   return totalDue;
 }
 
+/* ── Entering-user lookup ("Received By" / "Paid By") ──────────────────────── */
+let userNames = {};
+// payment.html stores the entering user on general_vouchers.entered_by (shown there as-is)
+const voucherUserId = v => v.entered_by || v.recorded_by || v.created_by || null;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const nameOfProfile = p => p && (p.full_name || p.name || p.display_name || p.username || p.email || null);
+const userCell = id => id
+  ? `<span class="by-pill">${E(userNames[id] || (UUID_RE.test(String(id)) ? "User " + String(id).slice(0,6) : String(id)))}</span>`
+  : `<span class="muted">—</span>`;
+
+async function resolveUsers(ids){
+  if(myAccess?.profile?.user_id && nameOfProfile(myAccess.profile)) userNames[myAccess.profile.user_id] = nameOfProfile(myAccess.profile);
+  // plain-text names (e.g. general_vouchers.entered_by) need no lookup — only UUIDs do
+  const need = [...new Set(ids.filter(Boolean))].filter(id => !userNames[id] && UUID_RE.test(String(id)));
+  if(!need.length) return;
+  const nameOf = nameOfProfile;
+  for(const table of ["profiles","user_profiles","users"]){
+    for(const col of ["user_id","id"]){
+      try {
+        const { data, error } = await supabaseClient.from(table).select("*").in(col, need);
+        if(error || !data || !data.length) continue;
+        data.forEach(p => { const n = nameOf(p); if(n) userNames[p[col]] = n; });
+        if(need.every(id => userNames[id])) return;
+      } catch(e){ /* try next */ }
+    }
+  }
+}
+
 /* ── State ─────────────────────────────────────────────────────────────────── */
 let myAccess = null;
 let cfCategories = {};
@@ -437,21 +466,15 @@ async function init(){
 /* ── Load everything once, then derive opening + closing from the same data ── */
 async function loadDataset(date){
   const sb = supabaseClient;
-  const dayStart = new Date(date + "T00:00:00").toISOString();
-  const dayEnd   = new Date(shiftDay(date, 1) + "T00:00:00").toISOString();
-
-  const [receipts, enteredToday, vouchers, cfIn, cfOut, xfers, students, feeMaster, oldDues, duePayments, feeCats] =
+  const [receipts, undatedRes, vouchers, cfIn, cfOut, xfers, students, feeMaster, oldDues, duePayments, feeCats] =
     await Promise.all([
-      // every receipt dated on/before the day (plus undated legacy rows, filtered client-side)
+      // every receipt whose Fee Receive Date is on/before the day
       fetchAll(() => sb.from("fee_receipts")
-        .select("receipt_id,student_reg_no,fee_type,category_id,for_months,amount_cash,amount_bank,amount_phonepe,discount,remark,received_date,recorded_at")
-        .or(`received_date.lte.${date},received_date.is.null`)
+        .select("receipt_id,student_reg_no,fee_type,category_id,for_months,amount_cash,amount_bank,amount_phonepe,discount,remark,received_date,recorded_at,recorded_by")
+        .lte("received_date", date)
         .order("receipt_id")),
-      // receipts ENTERED on this day (used only to flag ones carrying a different receive date)
-      fetchAll(() => sb.from("fee_receipts")
-        .select("receipt_id,student_reg_no,fee_type,amount_cash,amount_bank,amount_phonepe,received_date,recorded_at")
-        .gte("recorded_at", dayStart).lt("recorded_at", dayEnd)
-        .order("receipt_id")),
+      // count of receipts with no Fee Receive Date (cannot be placed on any day)
+      sb.from("fee_receipts").select("receipt_id", { count:"exact", head:true }).is("received_date", null),
       fetchAll(() => sb.from("general_vouchers").select("*")
         .eq("status","used").lte("voucher_date", date)
         .order("voucher_date").order("voucher_seq")),
@@ -468,7 +491,7 @@ async function loadDataset(date){
       fetchAll(() => sb.from("fee_categories").select("category_id,name").order("category_id")),
     ]);
 
-  return { receipts, enteredToday, vouchers, cfIn, cfOut, xfers, students, feeMaster, oldDues, duePayments, feeCats };
+  return { receipts, undatedCount: undatedRes.count || 0, vouchers, cfIn, cfOut, xfers, students, feeMaster, oldDues, duePayments, feeCats };
 }
 
 /* ── Position (funds + dues) as at the END of a given date ─────────────────── */
@@ -561,13 +584,14 @@ async function loadSheet(forceRecalc = false){
     const dayIn   = ds.cfIn.filter(r => r.txn_date === date);
     const dayOut  = ds.cfOut.filter(r => r.txn_date === date);
     const dayXfer = ds.xfers.filter(r => r.txn_date === date);
-    const misDated = ds.enteredToday.filter(r => effDate(r) !== date);
+
+    await resolveUsers([...dayFees.map(r => r.recorded_by), ...dayVouchers.map(voucherUserId)]);
 
     $("bannerDate").textContent = fmtLong(date);
     $("bannerMeta").innerHTML = `Generated ${E(new Date().toLocaleString("en-IN"))}<br/>${dayFees.length} receipt${dayFees.length!==1?"s":""} · ${dayVouchers.length} voucher${dayVouchers.length!==1?"s":""}`;
 
     renderPosition("openingBody", opening, null);
-    renderFeeTable(dayFees, idx.studentMap, catMap, misDated);
+    renderFeeTable(dayFees, idx.studentMap, catMap, ds.undatedCount);
     renderVoucherTable(dayVouchers);
     renderCFTable(dayIn, dayOut);
     renderXferTable(dayXfer);
@@ -649,22 +673,12 @@ function feeForHtml(r, catMap){
   return `<span class="tag tag-o">Other</span>${cat ? `<div class="for-months">${E(cat)}</div>` : ""}`;
 }
 
-function renderFeeTable(rows, studentMap, catMap, misDated){
+function renderFeeTable(rows, studentMap, catMap, undatedCount){
   const body = $("feeBody"), foot = $("feeFoot"), empty = $("feeEmpty"), tbl = $("feeTable"), kpis = $("feeKpis");
   $("feeCount").textContent = `${rows.length} receipt${rows.length!==1?"s":""}`;
 
   const notes = [];
-  const fallbackCount = rows.filter(r => !r.received_date).length;
-  if(fallbackCount) notes.push(`<div class="ds-note"><b>${fallbackCount} receipt${fallbackCount!==1?"s":""}</b> had no Receive Date saved, so they are placed on the date they were recorded (marked <span class="fallback-flag">*</span>).</div>`);
-  if(misDated.length){
-    notes.push(`<details class="ds-note"><summary>${misDated.length} receipt${misDated.length!==1?"s were":" was"} entered today but ${misDated.length!==1?"carry":"carries"} a different Receive Date</summary>
-      <ul>${misDated.map(r => {
-        const st = studentMap.get(r.student_reg_no);
-        const amt = Number(r.amount_cash||0)+Number(r.amount_bank||0)+Number(r.amount_phonepe||0);
-        return `<li>${E(st?.name || r.student_reg_no)} (${E(r.student_reg_no)}) — ${inr(amt)} — dated <b>${E(fmtShort(effDate(r)))}</b></li>`;
-      }).join("")}</ul>
-      <div style="margin-top:6px;">They appear on the sheet of their own Receive Date, not on this one.</div></details>`);
-  }
+  if(undatedCount) notes.push(`<div class="ds-note"><b>${undatedCount} receipt${undatedCount!==1?"s":""}</b> in the system ${undatedCount!==1?"have":"has"} no Fee Receive Date, so ${undatedCount!==1?"they are":"it is"} not counted on any day's sheet. Open the student's Fee Collection history and edit the Receive Date to include ${undatedCount!==1?"them":"it"}.</div>`);
   $("feeNotes").innerHTML = notes.join("");
 
   if(!rows.length){
@@ -690,7 +704,7 @@ function renderFeeTable(rows, studentMap, catMap, misDated){
       : `<span class="muted">Discount only</span>`;
 
     return `<tr>
-      <td class="idx">${i+1}${r.received_date ? "" : ` <span class="fallback-flag" title="No Receive Date saved — placed by recorded date">*</span>`}</td>
+      <td class="idx">${i+1}</td>
       <td><div class="nm">${E(st?.name || r.student_reg_no)}</div><div class="sub">Reg ${E(r.student_reg_no)}</div></td>
       <td><span class="cls-pill">${E(classLabel(st?.class))}</span></td>
       <td>${feeForHtml(r, catMap)}</td>
@@ -698,6 +712,7 @@ function renderFeeTable(rows, studentMap, catMap, misDated){
       <td>${modeCell}</td>
       <td class="num">${Number(r.discount||0) > 0 ? inr(r.discount) : `<span class="muted">—</span>`}</td>
       <td>${E(r.remark || "")}</td>
+      <td>${userCell(r.recorded_by)}</td>
     </tr>`;
   }).join("");
 
@@ -707,7 +722,7 @@ function renderFeeTable(rows, studentMap, catMap, misDated){
     <td class="num">${inr(grand)}</td>
     <td></td>
     <td class="num">${inr(tot.disc)}</td>
-    <td></td>
+    <td></td><td></td>
   </tr>`;
 
   const kpi = (label, val, main) => `<div class="ds-kpi ${main ? "k-main" : ""}"><div class="k-label">${label}</div><div class="k-value">${inr(val)}</div></div>`;
@@ -734,6 +749,7 @@ function renderVoucherTable(rows){
     <td>${modeBadge(r.payment_mode)}</td>
     <td>${E(r.category || "")}</td>
     <td>${E(r.description || "")}</td>
+    <td>${userCell(voucherUserId(r))}</td>
   </tr>`).join("");
 
   const tot = { cash:0, bank:0, phonepe:0 };
@@ -742,7 +758,7 @@ function renderVoucherTable(rows){
   foot.innerHTML = `<tr>
     <td colspan="3">Total · ${rows.length} voucher${rows.length!==1?"s":""}</td>
     <td class="num">${inr(grand)}</td>
-    <td colspan="3" style="font-size:.76rem;font-weight:600;">
+    <td colspan="4" style="font-size:.76rem;font-weight:600;">
       Cash ${inr(tot.cash)} &nbsp;·&nbsp; Bank ${inr(tot.bank)} &nbsp;·&nbsp; PhonePe ${inr(tot.phonepe)}
     </td>
   </tr>`;
