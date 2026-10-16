@@ -133,8 +133,10 @@
 const PAGE_ID = "fee-due-report"; // must match menu.js id
 let myAccess = null;
 let lastDateRangeRows = []; // for export
+let lastDateRangeBreak = null;
 let lastMonthwiseRows = []; // for filter + export
 let lastMonthwiseMeta = null; // { yy, mm }
+let lastMonthwiseBreak = null; // received breakdown for the month (for export)
 
 const CLASS_LABELS = {
   "4":"Class 4","5":"Class 5","6":"Class 6","7":"Class 7","8":"Class 8",
@@ -226,6 +228,61 @@ function computeAdmissionLedger(feeMasterRows, receipts){
 }
 function money(n){ return "₹" + Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}); }
 function receiptTotal(r){ return Number(r.amount_cash)+Number(r.amount_bank)+Number(r.amount_phonepe)+Number(r.discount); }
+
+/* ---- Received-date helpers (reports use the RECEIVED date, never the entry/recorded date) ---- */
+function recvDate(r){            // -> "YYYY-MM-DD"
+  if (r.received_date) return String(r.received_date).slice(0,10);
+  if (!r.recorded_at) return "";  // fallback for old rows that have no received_date
+  const d = new Date(r.recorded_at);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function fmtDMY(v){              // "YYYY-MM-DD" -> "DD-MM-YYYY"
+  const m = String(v||"").slice(0,10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : "—";
+}
+function recvDMY(r){ return fmtDMY(recvDate(r)); }
+
+/* ---- Monthly / Admission / Other received, separately, then Total ---- */
+const TYPE_ROWS = [
+  ["monthly","Monthly"],
+  ["admission_readmission","Admission/Readm."],
+  ["other","Other"]
+];
+function sumByType(rows){
+  const z = () => ({cash:0,bank:0,phonepe:0,discount:0,total:0});
+  const o = { monthly:z(), admission_readmission:z(), other:z(), total:z() };
+  (rows||[]).forEach(r=>{
+    const k = o[r.fee_type] ? r.fee_type : "other";
+    [k,"total"].forEach(t=>{
+      o[t].cash += Number(r.amount_cash)||0; o[t].bank += Number(r.amount_bank)||0;
+      o[t].phonepe += Number(r.amount_phonepe)||0; o[t].discount += Number(r.discount)||0;
+    });
+  });
+  Object.values(o).forEach(x=>{ x.total = x.cash+x.bank+x.phonepe+x.discount; });
+  return o;
+}
+function receivedCards(b, suffix=""){
+  return `<div class="fr-cards">
+    <div class="fr-card"><div class="label">Monthly Received${suffix}</div><div class="value">${money(b.monthly.total)}</div></div>
+    <div class="fr-card"><div class="label">Admission/Readm. Received${suffix}</div><div class="value">${money(b.admission_readmission.total)}</div></div>
+    <div class="fr-card"><div class="label">Other Received${suffix}</div><div class="value">${money(b.other.total)}</div></div>
+    <div class="fr-card ok"><div class="label">Total Received${suffix}</div><div class="value">${money(b.total.total)}</div></div>
+  </div>`;
+}
+function breakdownTableHtml(b){
+  const row = (label,x,bold) => `<tr${bold?' style="font-weight:700;"':''}><td>${label}</td>
+    <td class="num">${money(x.cash)}</td><td class="num">${money(x.bank)}</td><td class="num">${money(x.phonepe)}</td>
+    <td class="num">${money(x.discount)}</td><td class="num">${money(x.total)}</td></tr>`;
+  return `<div class="table-wrap"><table class="data">
+    <thead><tr><th>Fee Type</th><th class="num">Cash</th><th class="num">Bank</th><th class="num">PhonePe</th><th class="num">Discount</th><th class="num">Total</th></tr></thead>
+    <tbody>${TYPE_ROWS.map(([k,l])=>row(l,b[k],false)).join("")}${row("Total",b.total,true)}</tbody></table></div>`;
+}
+function breakdownAoa(b){
+  const aoa = [["Fee Type","Cash","Bank","PhonePe","Discount","Total"]];
+  TYPE_ROWS.forEach(([k,l])=>aoa.push([l,b[k].cash,b[k].bank,b[k].phonepe,b[k].discount,b[k].total]));
+  aoa.push(["Total",b.total.cash,b.total.bank,b.total.phonepe,b.total.discount,b.total.total]);
+  return aoa;
+}
 
 /* =====================================================================
    PAGINATED FETCH HELPERS
@@ -340,7 +397,8 @@ async function showStudentReport(student) {
   const today = new Date();
   const mLed = computeMonthlyLedger(student, monthlyRates, monthlyReceipts, today);
   const aLed = computeAdmissionLedger(feeMaster||[], admissionReceipts);
-  const otherTotal = otherReceipts.reduce((s,r)=>s+receiptTotal(r),0);
+  const sortedReceipts = [...(receipts||[])].sort((a,b)=> recvDate(b).localeCompare(recvDate(a)) || String(b.recorded_at).localeCompare(String(a.recorded_at)));
+  const recvBreak = sumByType(sortedReceipts);
 
   resultArea.innerHTML = `
     <div class="fr-student-card">
@@ -352,9 +410,9 @@ async function showStudentReport(student) {
     <div class="fr-cards">
       <div class="fr-card ${mLed.totalDue>0?'warn':'ok'}"><div class="label">Monthly Due</div><div class="value">${money(mLed.totalDue)}</div></div>
       <div class="fr-card ${aLed.due>0?'warn':'ok'}"><div class="label">Admission/Readm. Due</div><div class="value">${money(aLed.due)}</div></div>
-      <div class="fr-card"><div class="label">Other Fee Received</div><div class="value">${money(otherTotal)}</div></div>
       <div class="fr-card warn"><div class="label">Total Due (all)</div><div class="value">${money(mLed.totalDue+aLed.due)}</div></div>
     </div>
+    ${receivedCards(recvBreak)}
 
     <h4>Monthly Fee — ${CLASS_LABELS[student.class]||student.class} session</h4>
     <div class="month-grid">${mLed.windowMonths.map(mo=>`
@@ -363,19 +421,23 @@ async function showStudentReport(student) {
 
     <h4>All Payment History</h4>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>Date</th><th>Type</th><th>Detail</th><th class="num">Cash</th><th class="num">Bank</th><th class="num">PhonePe</th><th class="num">Discount</th><th>Remark</th></tr></thead>
-      <tbody>${(receipts||[]).length ? receipts.map(r=>{
+      <thead><tr><th>Received Date</th><th>Type</th><th>Detail</th><th class="num">Cash</th><th class="num">Bank</th><th class="num">PhonePe</th><th class="num">Discount</th><th class="num">Total</th><th>Remark</th></tr></thead>
+      <tbody>${sortedReceipts.length ? sortedReceipts.map(r=>{
         const detail = r.fee_type==="monthly" ? (r.for_months||[]).join(", ")
           : r.fee_type==="other" ? (categories.find(c=>c.category_id===r.category_id)?.name || "—")
           : "—";
-        return `<tr><td>${formatDateTime(r.recorded_at)}</td>
+        return `<tr><td>${recvDMY(r)}</td>
           <td>${r.fee_type==="admission_readmission"?"Admission/Readm.":r.fee_type[0].toUpperCase()+r.fee_type.slice(1)}</td>
           <td>${escapeHtml(detail)}</td>
           <td class="num">${money(r.amount_cash)}</td><td class="num">${money(r.amount_bank)}</td>
           <td class="num">${money(r.amount_phonepe)}</td><td class="num">${money(r.discount)}</td>
+          <td class="num">${money(receiptTotal(r))}</td>
           <td>${escapeHtml(r.remark||"")}</td></tr>`;
-      }).join("") : `<tr><td colspan="8">No payments recorded yet.</td></tr>`}</tbody>
+      }).join("") : `<tr><td colspan="9">No payments recorded yet.</td></tr>`}</tbody>
     </table></div>
+
+    <h4 style="margin-top:20px;">Received Summary</h4>
+    ${breakdownTableHtml(recvBreak)}
   `;
 }
 
@@ -405,7 +467,7 @@ async function generateClasswise() {
   } catch (error) { resultArea.innerHTML = `<div class="field-error show">${escapeHtml(error.message)}</div>`; return; }
 
   const today = new Date();
-  let sumMonthlyDue=0, sumAdmDue=0, sumReceived=0;
+  let sumMonthlyDue=0, sumAdmDue=0;
   const rows = students.map(s => {
     const fm = (feeMaster||[]).filter(r=>r.student_reg_no===s.reg_no);
     const rc = (receipts||[]).filter(r=>r.student_reg_no===s.reg_no);
@@ -414,26 +476,30 @@ async function generateClasswise() {
     const admReceipts = rc.filter(r=>r.fee_type==="admission_readmission");
     const mLed = computeMonthlyLedger(s, monthlyRates, monthlyReceipts, today);
     const aLed = computeAdmissionLedger(fm, admReceipts);
-    const received = rc.reduce((sum,r)=>sum+receiptTotal(r),0);
-    sumMonthlyDue += mLed.totalDue; sumAdmDue += aLed.due; sumReceived += received;
-    return { s, monthlyDue: mLed.totalDue, admDue: aLed.due, received };
+    const rb = sumByType(rc);
+    sumMonthlyDue += mLed.totalDue; sumAdmDue += aLed.due;
+    return { s, monthlyDue: mLed.totalDue, admDue: aLed.due, rb };
   });
+  const allBreak = sumByType(rows.flatMap(r => (receipts||[]).filter(x=>x.student_reg_no===r.s.reg_no)));
 
   resultArea.innerHTML = `
     <div class="fr-cards">
       <div class="fr-card"><div class="label">Students</div><div class="value">${students.length}</div></div>
       <div class="fr-card warn"><div class="label">Total Monthly Due</div><div class="value">${money(sumMonthlyDue)}</div></div>
       <div class="fr-card warn"><div class="label">Total Admission Due</div><div class="value">${money(sumAdmDue)}</div></div>
-      <div class="fr-card ok"><div class="label">Total Received (all-time)</div><div class="value">${money(sumReceived)}</div></div>
     </div>
+    ${receivedCards(allBreak, " (all-time)")}
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Reg No</th><th>Name</th><th>Class</th><th>Status</th>
-        <th class="num">Monthly Due</th><th class="num">Admission Due</th><th class="num">Total Due</th><th class="num">Received</th></tr></thead>
+        <th class="num">Monthly Due</th><th class="num">Admission Due</th><th class="num">Total Due</th>
+        <th class="num">Monthly Recd</th><th class="num">Admission Recd</th><th class="num">Other Recd</th><th class="num">Total Recd</th></tr></thead>
       <tbody>${rows.map(r=>`<tr>
         <td>${escapeHtml(r.s.reg_no)}</td><td>${escapeHtml(r.s.name)}</td>
         <td>${escapeHtml(CLASS_LABELS[r.s.class]||r.s.class)}</td><td>${statusBadge(r.s.status)}</td>
         <td class="num">${money(r.monthlyDue)}</td><td class="num">${money(r.admDue)}</td>
-        <td class="num">${money(r.monthlyDue+r.admDue)}</td><td class="num">${money(r.received)}</td>
+        <td class="num">${money(r.monthlyDue+r.admDue)}</td>
+        <td class="num">${money(r.rb.monthly.total)}</td><td class="num">${money(r.rb.admission_readmission.total)}</td>
+        <td class="num">${money(r.rb.other.total)}</td><td class="num">${money(r.rb.total.total)}</td>
       </tr>`).join("")}</tbody>
     </table></div>
   `;
@@ -477,24 +543,13 @@ async function generateMonthwise() {
     if (entry.status === "partial") totalPaidThisMonth += (entry.rate - entry.due);
   }
 
-  // Collections actually recorded during this calendar month (any fee type)
-  const monthStart = new Date(yy, mm-1, 1);
-  const monthEnd = new Date(yy, mm, 0, 23,59,59);
-  const collected = (receipts||[]).filter(r=>{
-    const d = new Date(r.recorded_at);
-    return d >= monthStart && d <= monthEnd;
-  });
-  const byType = { monthly:0, admission_readmission:0, other:0 };
-  let cashSum=0, bankSum=0, phonepeSum=0, discountSum=0;
-  collected.forEach(r=>{
-    byType[r.fee_type] += receiptTotal(r);
-    cashSum += Number(r.amount_cash); bankSum += Number(r.amount_bank);
-    phonepeSum += Number(r.amount_phonepe); discountSum += Number(r.discount);
-  });
-  const grandCollected = cashSum+bankSum+phonepeSum+discountSum;
+  // Collections RECEIVED during this calendar month (by Received Date, not entry date)
+  const collected = (receipts||[]).filter(r => recvDate(r).slice(0,7) === key);
+  const collectedBreak = sumByType(collected);
 
   lastMonthwiseRows = dueRows;
   lastMonthwiseMeta = { yy, mm };
+  lastMonthwiseBreak = collectedBreak;
 
   resultArea.innerHTML = `
     <h4>Due Status for ${MONTH_NAMES[mm-1]} ${yy}</h4>
@@ -507,18 +562,9 @@ async function generateMonthwise() {
       <tbody id="mDueTableBody"></tbody>
     </table></div>
 
-    <h4 style="margin-top:24px;">Amount Collected During ${MONTH_NAMES[mm-1]} ${yy}</h4>
-    <div class="fr-cards">
-      <div class="fr-card"><div class="label">Monthly</div><div class="value">${money(byType.monthly)}</div></div>
-      <div class="fr-card"><div class="label">Admission/Readm.</div><div class="value">${money(byType.admission_readmission)}</div></div>
-      <div class="fr-card"><div class="label">Other</div><div class="value">${money(byType.other)}</div></div>
-      <div class="fr-card ok"><div class="label">Total Collected</div><div class="value">${money(grandCollected)}</div></div>
-    </div>
-    <div class="table-wrap"><table class="data">
-      <thead><tr><th>Cash</th><th>Bank</th><th>PhonePe</th><th>Discount</th></tr></thead>
-      <tbody><tr><td class="num">${money(cashSum)}</td><td class="num">${money(bankSum)}</td>
-        <td class="num">${money(phonepeSum)}</td><td class="num">${money(discountSum)}</td></tr></tbody>
-    </table></div>
+    <h4 style="margin-top:24px;">Amount Received During ${MONTH_NAMES[mm-1]} ${yy} <small style="font-weight:400;opacity:.7;">(by received date)</small></h4>
+    ${receivedCards(collectedBreak)}
+    ${breakdownTableHtml(collectedBreak)}
   `;
   renderMonthwiseTable();
 }
@@ -561,6 +607,7 @@ function exportMonthwiseExcel() {
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Month-wise Due");
+  if (lastMonthwiseBreak) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(breakdownAoa(lastMonthwiseBreak)), "Received");
   XLSX.writeFile(wb, `monthwise_due_${MONTH_NAMES[mm-1]}_${yy}.xlsx`);
 }
 
@@ -589,6 +636,19 @@ function exportMonthwisePDF() {
     styles: { fontSize: 9 },
     headStyles: { fillColor: [176,141,87] }
   });
+  if (lastMonthwiseBreak) {
+    const b = lastMonthwiseBreak;
+    const y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : 28) + 10;
+    doc.setFontSize(11);
+    doc.text(`Amount Received During ${MONTH_NAMES[mm-1]} ${yy} (by received date)`, 14, y);
+    doc.autoTable({
+      startY: y + 4,
+      head: [["Fee Type","Cash","Bank","PhonePe","Discount","Total"]],
+      body: breakdownAoa(b).slice(1).map(r => [r[0], ...r.slice(1).map(money)]),
+      styles: { fontSize: 9 }, headStyles: { fillColor: [176,141,87] },
+      columnStyles: { 1:{halign:"right"},2:{halign:"right"},3:{halign:"right"},4:{halign:"right"},5:{halign:"right"} }
+    });
+  }
   doc.save(`monthwise_due_${MONTH_NAMES[mm-1]}_${yy}.pdf`);
 }
 
@@ -610,9 +670,10 @@ async function generateDateRange() {
   let data;
   try {
     data = await fetchAll(() => {
+      // Filter by RECEIVED date (rows with no received_date fall back to the entry date)
       let q = supabaseClient.from("fee_receipts").select("*, student_master(name, class)")
-        .gte("recorded_at", startIso).lte("recorded_at", endIso)
-        .order("recorded_at", { ascending: false }).order("student_reg_no", { ascending: true });
+        .or(`and(received_date.gte.${start},received_date.lte.${end}),and(received_date.is.null,recorded_at.gte.${startIso},recorded_at.lte.${endIso})`)
+        .order("received_date", { ascending: false }).order("recorded_at", { ascending: false }).order("student_reg_no", { ascending: true });
       if (feeType) q = q.eq("fee_type", feeType);
       return q;
     });
@@ -629,50 +690,51 @@ async function generateDateRange() {
     category_name: r.fee_type==="other" ? (categories.find(c=>c.category_id===r.category_id)?.name || "") : ""
   }));
 
-  const totals = lastDateRangeRows.reduce((acc,r)=>{
-    acc.cash += Number(r.amount_cash); acc.bank += Number(r.amount_bank);
-    acc.phonepe += Number(r.amount_phonepe); acc.discount += Number(r.discount);
-    return acc;
-  }, { cash:0, bank:0, phonepe:0, discount:0 });
-  const grand = totals.cash+totals.bank+totals.phonepe+totals.discount;
+  lastDateRangeRows.sort((a,b)=> recvDate(b).localeCompare(recvDate(a)) || String(a.student_reg_no).localeCompare(String(b.student_reg_no)));
+  const drBreak = sumByType(lastDateRangeRows);
+  lastDateRangeBreak = drBreak;
 
   resultArea.innerHTML = `
     <div class="fr-cards">
       <div class="fr-card"><div class="label">Receipts</div><div class="value">${lastDateRangeRows.length}</div></div>
-      <div class="fr-card ok"><div class="label">Total Collected</div><div class="value">${money(grand)}</div></div>
-      <div class="fr-card"><div class="label">Cash / Bank / PhonePe</div><div class="value" style="font-size:.95em;">${money(totals.cash)} / ${money(totals.bank)} / ${money(totals.phonepe)}</div></div>
     </div>
+    ${receivedCards(drBreak)}
+    ${breakdownTableHtml(drBreak)}
+    <h4 style="margin-top:20px;">Receipts (${fmtDMY(start)} to ${fmtDMY(end)})</h4>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>Date</th><th>Reg No</th><th>Name</th><th>Class</th><th>Type</th><th>Detail</th>
-        <th class="num">Cash</th><th class="num">Bank</th><th class="num">PhonePe</th><th class="num">Discount</th><th>Remark</th></tr></thead>
+      <thead><tr><th>Received Date</th><th>Reg No</th><th>Name</th><th>Class</th><th>Type</th><th>Detail</th>
+        <th class="num">Cash</th><th class="num">Bank</th><th class="num">PhonePe</th><th class="num">Discount</th><th class="num">Total</th><th>Remark</th></tr></thead>
       <tbody>${lastDateRangeRows.length ? lastDateRangeRows.map(r=>{
         const detail = r.fee_type==="monthly" ? (r.for_months||[]).join(", ") : r.fee_type==="other" ? r.category_name : "—";
-        return `<tr><td>${formatDateTime(r.recorded_at)}</td><td>${escapeHtml(r.student_reg_no)}</td>
+        return `<tr><td>${recvDMY(r)}</td><td>${escapeHtml(r.student_reg_no)}</td>
         <td>${escapeHtml(r.student_name)}</td><td>${escapeHtml(CLASS_LABELS[r.student_class]||r.student_class)}</td>
         <td>${r.fee_type==="admission_readmission"?"Admission/Readm.":r.fee_type[0].toUpperCase()+r.fee_type.slice(1)}</td>
         <td>${escapeHtml(detail)}</td>
         <td class="num">${money(r.amount_cash)}</td><td class="num">${money(r.amount_bank)}</td>
         <td class="num">${money(r.amount_phonepe)}</td><td class="num">${money(r.discount)}</td>
+        <td class="num">${money(receiptTotal(r))}</td>
         <td>${escapeHtml(r.remark||"")}</td></tr>`;
-      }).join("") : `<tr><td colspan="11">No receipts in this range.</td></tr>`}</tbody>
+      }).join("") : `<tr><td colspan="12">No receipts in this range.</td></tr>`}</tbody>
     </table></div>
   `;
 }
 
 function exportDateRange() {
   if (!lastDateRangeRows.length) { showToast("Generate a report first.", "error"); return; }
-  const aoa = [["Date","Reg No","Name","Class","Type","Detail","Cash","Bank","PhonePe","Discount","Remark"]];
+  const aoa = [["Received Date","Reg No","Name","Class","Type","Detail","Cash","Bank","PhonePe","Discount","Total","Remark"]];
   lastDateRangeRows.forEach(r=>{
     const detail = r.fee_type==="monthly" ? (r.for_months||[]).join(", ") : r.fee_type==="other" ? r.category_name : "";
     aoa.push([
-      formatDateTime(r.recorded_at), r.student_reg_no, r.student_name, CLASS_LABELS[r.student_class]||r.student_class,
-      r.fee_type, detail, r.amount_cash, r.amount_bank, r.amount_phonepe, r.discount, r.remark||""
+      recvDMY(r), r.student_reg_no, r.student_name, CLASS_LABELS[r.student_class]||r.student_class,
+      r.fee_type==="admission_readmission"?"Admission/Readm.":r.fee_type[0].toUpperCase()+r.fee_type.slice(1),
+      detail, Number(r.amount_cash), Number(r.amount_bank), Number(r.amount_phonepe), Number(r.discount), receiptTotal(r), r.remark||""
     ]);
   });
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Report");
-  XLSX.writeFile(wb, `fee_collection_${document.getElementById("dStart").value}_to_${document.getElementById("dEnd").value}.xlsx`);
+  if (lastDateRangeBreak) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(breakdownAoa(lastDateRangeBreak)), "Summary");
+  XLSX.writeFile(wb, `fee_collection_${fmtDMY(document.getElementById("dStart").value)}_to_${fmtDMY(document.getElementById("dEnd").value)}.xlsx`);
 }
 
 init();
